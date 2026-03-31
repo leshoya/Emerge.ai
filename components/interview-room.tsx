@@ -584,7 +584,8 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     const trimmed = response?.trim() ?? ""
 
     if (!trimmed) {
-      return { score: 15, breakdown: { structure: 15, communication: 20, insights: 15, responseTime: 25 } }
+      // If SpeechRecognition captured nothing, treat as 0% to avoid misleading "minimum" grades.
+      return { score: 0, breakdown: { structure: 0, communication: 0, insights: 0, responseTime: 0 } }
     }
 
     const wordCount = trimmed.split(/\s+/).filter((w) => w.length > 0).length
@@ -665,7 +666,7 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     const overall = Math.round(overallRaw)
 
     return {
-      score: Math.min(Math.max(overall, 10), 95),
+      score: Math.min(Math.max(overall, 0), 95),
       breakdown: {
         structure: Math.round(structureScore),
         communication: Math.round(communicationScore),
@@ -701,7 +702,7 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     )
 
     const feedback = {
-      overallScore: Math.min(Math.max(overallScore, 25), 95),
+      overallScore: Math.min(Math.max(overallScore, 0), 95),
       structure: avgStructure,
       communication: avgCommunication,
       insights: avgInsights,

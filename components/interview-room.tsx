@@ -16,6 +16,7 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
   const [currentQuestion, setCurrentQuestion] = useState(0)
   const [questions, setQuestions] = useState<string[]>([])
   const [responses, setResponses] = useState<string[]>([])
+  const [responseTimes, setResponseTimes] = useState<number[]>([])
   const [isRecording, setIsRecording] = useState(false)
   const [isMicOn, setIsMicOn] = useState(true)
   const [isVideoOn, setIsVideoOn] = useState(true)
@@ -37,6 +38,25 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
   const streamRef = useRef<MediaStream | null>(null)
   const questionSpokenRef = useRef<number>(-1)
   const isSpeakingRef = useRef(false)
+  const pendingBaseResponseRef = useRef<string | null>(null)
+  const pendingBaseResponseTimeRef = useRef<number>(0)
+  const lastTranscriptAtRef = useRef<number | null>(null)
+  const silenceLockRef = useRef(false)
+  const isRecordingRef = useRef(false)
+  const isMicOnRef = useRef(isMicOn)
+  const aiSpeakingRef = useRef(aiSpeaking)
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording
+  }, [isRecording])
+
+  useEffect(() => {
+    isMicOnRef.current = isMicOn
+  }, [isMicOn])
+
+  useEffect(() => {
+    aiSpeakingRef.current = aiSpeaking
+  }, [aiSpeaking])
 
   useEffect(() => {
     const loadVoices = () => {
@@ -162,6 +182,7 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
       }
 
       const fullTranscript = (finalTranscript + interimTranscript).trim()
+      lastTranscriptAtRef.current = Date.now()
       setTranscript(fullTranscript)
       // Live caption shows the most recent portion of speech
       setLiveCaption(interimTranscript || finalTranscript.split(" ").slice(-10).join(" "))
@@ -267,6 +288,10 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
         setIsInitialized(true)
 
         speakText(questions[0], () => {
+            pendingBaseResponseRef.current = null
+            silenceLockRef.current = false
+            lastTranscriptAtRef.current = null
+            setTranscript("")
           setIsRecording(true)
           setResponseTime(0)
           setTimeout(safeStartRecognition, 300)
@@ -281,25 +306,71 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     (response: string): boolean => {
       if (hasAskedFollowUp) return false // Only ask one follow-up per question
 
+      const lower = response.toLowerCase()
       const wordCount = response.split(/\s+/).filter((w) => w.length > 0).length
 
-      // Too short response
-      if (wordCount < 20) return true
+      const minWords =
+        config.difficulty === "Entry" ? 35 : config.difficulty === "Mid-Level" ? 50 : /* Senior */ 65
 
-      // Check for structure indicators
-      const structureKeywords = ["first", "second", "because", "for example", "specifically", "let me"]
-      const hasStructure = structureKeywords.some((kw) => response.toLowerCase().includes(kw))
+      const structureKeywords = [
+        "first",
+        "second",
+        "third",
+        "finally",
+        "because",
+        "for example",
+        "specifically",
+        "let me",
+        "framework",
+        "approach",
+        "in conclusion",
+        "to summarize",
+      ]
+      const hasStructure = structureKeywords.some((kw) => lower.includes(kw))
 
-      // Check for depth indicators
-      const depthKeywords = ["metric", "user", "customer", "revenue", "cost", "percent", "million", "stakeholder"]
-      const hasDepth = depthKeywords.some((kw) => response.toLowerCase().includes(kw))
+      const hasNumbers = /\d+/.test(lower)
+      const hasPercent = /%|percent/.test(lower)
+      const hasMetrics = /(metric|kpi|engagement|retention|revenue|cost|profit|stakeholder|customer|user)/i.test(
+        lower,
+      )
+      const hasQuant = hasNumbers || hasPercent || hasMetrics
 
-      // If response is medium length but lacks structure or depth, ask follow-up
-      if (wordCount < 50 && !hasStructure && !hasDepth) return true
+      const hasRecommendation = /(recommend|therefore|so what|next steps|timeline|in conclusion|to summarize|action plan)/i.test(
+        lower,
+      )
 
+      const hasSTAR = /(situation|task|action|result|star|what i learned|what I learned|outcome|impact)/i.test(lower)
+
+      // Harsh: too short or missing the key interview "shape"
+      if (wordCount < minWords) return true
+
+      if (config.interviewType === "Behavioral") {
+        if (!hasSTAR) return true
+        if (!hasRecommendation && !hasSTAR) return true
+        return false
+      }
+
+      if (config.interviewType === "Case Interview") {
+        if (!hasStructure) return true
+        if (!hasQuant) return true
+        if (!hasRecommendation) return true
+        return false
+      }
+
+      if (config.interviewType === "Estimation") {
+        if (!hasStructure) return true
+        if (!hasNumbers && !hasPercent) return true
+        if (!/(assumption|validate|sanity|range|uncertainty)/i.test(lower)) return true
+        return false
+      }
+
+      // Product Sense
+      if (!hasStructure) return true
+      if (!hasQuant) return true
+      if (!/(risk|trade-off|prioritize|roadmap|success|metric|kpi)/i.test(lower)) return true
       return false
     },
-    [hasAskedFollowUp],
+    [hasAskedFollowUp, config.difficulty, config.interviewType],
   )
 
   const getFollowUpQuestion = useCallback(
@@ -307,32 +378,49 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
       const typeFollowUps =
         followUpQuestions[config.interviewType as keyof typeof followUpQuestions] || followUpQuestions["Behavioral"]
 
+      const lower = response.toLowerCase()
       const wordCount = response.split(/\s+/).filter((w) => w.length > 0).length
 
-      // Very short response - ask for elaboration
-      if (wordCount < 15) {
-        return typeFollowUps[0]
+      const minWords =
+        config.difficulty === "Entry" ? 35 : config.difficulty === "Mid-Level" ? 50 : /* Senior */ 65
+
+      const hasStructure = /(first|second|third|framework|approach|in conclusion|to summarize)/i.test(lower)
+      const hasNumbersOrPercents = /\d+/.test(lower) || /%|percent/.test(lower)
+      const hasMetrics = /(metric|kpi|engagement|retention|revenue|cost|profit|stakeholder|customer|user)/i.test(lower)
+      const hasRecommendation = /(recommend|therefore|so what|next steps|timeline|action plan|in conclusion|to summarize)/i.test(
+        lower,
+      )
+      const hasSTAR = /(situation|task|action|result|star|outcome|impact|what i learned|learned)/i.test(lower)
+
+      if (wordCount < minWords) return typeFollowUps[0]
+
+      if (config.interviewType === "Behavioral") {
+        if (!hasSTAR) return typeFollowUps[0]
+        if (!/(outcome|result|impact|what i learned|learned)/i.test(lower)) return typeFollowUps[1]
+        return typeFollowUps[2]
       }
 
-      // Check what's missing
-      const hasMetrics = /\d+|percent|metric|kpi/i.test(response)
-      const hasExample = /example|instance|time when|specifically/i.test(response)
-      const hasStructure = /first|second|three|framework|approach/i.test(response)
-
-      if (!hasMetrics && (config.interviewType === "Product Sense" || config.interviewType === "Estimation")) {
-        return typeFollowUps[2] // Ask to quantify
+      if (config.interviewType === "Case Interview") {
+        if (!hasStructure) return typeFollowUps[0]
+        if (!/(assumption)/i.test(lower)) return typeFollowUps[1]
+        if (!hasNumbersOrPercents && !hasMetrics) return typeFollowUps[2]
+        if (!hasRecommendation) return typeFollowUps[4]
+        return typeFollowUps[3]
       }
 
-      if (!hasExample && config.interviewType === "Behavioral") {
-        return typeFollowUps[0] // Ask for specific example
+      if (config.interviewType === "Estimation") {
+        if (!hasStructure) return typeFollowUps[0]
+        if (!hasNumbersOrPercents) return typeFollowUps[1]
+        if (!/(assumption|validate|sanity|range|uncertainty)/i.test(lower)) return typeFollowUps[2]
+        if (!/(range|uncertainty)/i.test(lower)) return typeFollowUps[3]
+        return typeFollowUps[4]
       }
 
-      if (!hasStructure && config.interviewType === "Case Interview") {
-        return typeFollowUps[0] // Ask to structure
-      }
-
-      // Default: pick a random follow-up
-      return typeFollowUps[Math.floor(Math.random() * typeFollowUps.length)]
+      // Product Sense
+      if (!hasStructure) return typeFollowUps[4]
+      if (!hasMetrics) return typeFollowUps[1]
+      if (!hasRecommendation) return typeFollowUps[3]
+      return typeFollowUps[2]
     },
     [config.interviewType],
   )
@@ -343,16 +431,71 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     setUserSpeaking(false)
     setLiveCaption("")
 
-    const currentTranscript = transcript
+    if (silenceLockRef.current) return
+    silenceLockRef.current = true
 
-    // Check if we need to ask a follow-up
+    const currentTranscript = transcript.trim()
+
+    // If we're coming back from a follow-up, merge base + follow-up into one response.
+    if (currentFollowUp) {
+      const base = pendingBaseResponseRef.current || ""
+      const baseTime = pendingBaseResponseTimeRef.current
+      const combinedTime = baseTime + responseTime
+      const fullResponse = base
+        ? `${base} [Follow-up: ${currentFollowUp}] ${currentTranscript}`
+        : `[Follow-up: ${currentFollowUp}] ${currentTranscript}`
+
+      const newResponses = [...responses, fullResponse]
+      pendingBaseResponseRef.current = null
+      pendingBaseResponseTimeRef.current = 0
+
+      const newResponseTimes = [...responseTimes, combinedTime]
+      setResponses(newResponses)
+      setResponseTimes(newResponseTimes)
+      setTranscript("")
+      setHasAskedFollowUp(false)
+      setCurrentFollowUp(null)
+
+      const nextIndex = currentQuestion + 1
+      if (nextIndex < questions.length) {
+        setCurrentQuestion(nextIndex)
+        questionSpokenRef.current = nextIndex
+
+        setTimeout(() => {
+          speakText(questions[nextIndex], () => {
+            silenceLockRef.current = false
+            lastTranscriptAtRef.current = null
+            setTranscript("")
+            setIsRecording(true)
+            setResponseTime(0)
+            setTimeout(safeStartRecognition, 300)
+          })
+        }, 800)
+      } else {
+        calculateFeedback(newResponses, newResponseTimes)
+      }
+
+      return
+    }
+
+    // Normal flow: decide whether we should ask a follow-up, or move on.
     if (needsFollowUp(currentTranscript) && !hasAskedFollowUp) {
       const followUp = getFollowUpQuestion(currentTranscript)
+
+      pendingBaseResponseRef.current = currentTranscript
+      pendingBaseResponseTimeRef.current = responseTime
       setCurrentFollowUp(followUp)
       setHasAskedFollowUp(true)
 
+      // Clear transcript so the next chunk is purely the follow-up answer.
+      setTranscript("")
+      lastTranscriptAtRef.current = null
+      silenceLockRef.current = true
+
       setTimeout(() => {
         speakText(followUp, () => {
+          silenceLockRef.current = false
+          lastTranscriptAtRef.current = null
           setIsRecording(true)
           setResponseTime(0)
           setTimeout(safeStartRecognition, 300)
@@ -361,39 +504,41 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
       return
     }
 
-    // Combine original transcript with any follow-up response
-    const fullResponse = currentFollowUp
-      ? `${responses[responses.length - 1] || ""} [Follow-up: ${currentFollowUp}] ${currentTranscript}`
-      : currentTranscript
-
-    const newResponses = currentFollowUp ? [...responses.slice(0, -1), fullResponse] : [...responses, currentTranscript]
-
+    const newResponses = [...responses, currentTranscript]
+    const newResponseTimes = [...responseTimes, responseTime]
     setResponses(newResponses)
+    setResponseTimes(newResponseTimes)
     setTranscript("")
     setHasAskedFollowUp(false)
     setCurrentFollowUp(null)
+    pendingBaseResponseRef.current = null
+    pendingBaseResponseTimeRef.current = 0
 
     const nextIndex = currentQuestion + 1
-
     if (nextIndex < questions.length) {
       setCurrentQuestion(nextIndex)
       questionSpokenRef.current = nextIndex
 
       setTimeout(() => {
         speakText(questions[nextIndex], () => {
+          silenceLockRef.current = false
+          lastTranscriptAtRef.current = null
+          setTranscript("")
           setIsRecording(true)
           setResponseTime(0)
           setTimeout(safeStartRecognition, 300)
         })
       }, 800)
     } else {
-      calculateFeedback(newResponses)
+      calculateFeedback(newResponses, newResponseTimes)
     }
   }, [
     currentQuestion,
     questions,
     responses,
+    responseTimes,
     transcript,
+    responseTime,
     speakText,
     safeStartRecognition,
     safeStopRecognition,
@@ -403,153 +548,140 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     currentFollowUp,
   ])
 
-  // Auto-advance when user finishes speaking
+  // Auto-advance when the interviewee has been silent for a bit.
+  // This keeps the "interviewer AI" moving even if SpeechRecognition doesn't fire `onend` reliably.
   useEffect(() => {
-    if (!isRecording || aiSpeaking || !isMicOn) return
+    if (!isRecording || !isMicOn || aiSpeakingRef.current || isSpeakingRef.current) return
 
-    // Only auto-advance if user has stopped speaking and there's a transcript
-    if (!userSpeaking && transcript.trim().length > 0) {
-      const wordCount = transcript.split(/\s+/).filter((w) => w.length > 0).length
-      
-      // Only auto-advance if there's a meaningful response (at least 5 words)
-      if (wordCount >= 5) {
-        const autoAdvanceTimeout = setTimeout(() => {
-          // Double-check conditions before auto-advancing
-          if (!userSpeaking && !aiSpeaking && isRecording && transcript.trim().length > 0) {
-            handleNextQuestion()
-          }
-        }, 4000) // Wait 4 seconds of silence before auto-advancing
+    const text = transcript.trim()
+    if (!text) return
 
-        return () => clearTimeout(autoAdvanceTimeout)
+    const wordCount = text.split(/\s+/).filter((w) => w.length > 0).length
+    if (wordCount < 5) return
+
+    const SILENCE_MS = 2200
+    const timeout = setTimeout(() => {
+      const lastAt = lastTranscriptAtRef.current
+      const sinceLast = lastAt ? Date.now() - lastAt : Infinity
+
+      if (
+        silenceLockRef.current === false &&
+        isRecordingRef.current &&
+        isMicOnRef.current &&
+        !aiSpeakingRef.current &&
+        !isSpeakingRef.current &&
+        sinceLast >= SILENCE_MS
+      ) {
+        handleNextQuestion()
       }
+    }, SILENCE_MS)
+
+    return () => clearTimeout(timeout)
+  }, [transcript, isRecording, isMicOn, handleNextQuestion])
+
+  const calculateResponseScore = (response: string, questionType: string, responseSeconds: number) => {
+    const lower = response?.toLowerCase() ?? ""
+    const trimmed = response?.trim() ?? ""
+
+    if (!trimmed) {
+      return { score: 15, breakdown: { structure: 15, communication: 20, insights: 15, responseTime: 25 } }
     }
-  }, [userSpeaking, transcript, isRecording, aiSpeaking, isMicOn, handleNextQuestion])
 
-  const calculateResponseScore = (response: string, questionType: string) => {
-    if (!response || response.trim().length === 0) {
-      return { score: 20, breakdown: { structure: 15, communication: 20, insights: 15, responseTime: 30 } }
-    }
+    const wordCount = trimmed.split(/\s+/).filter((w) => w.length > 0).length
+    const sentences = trimmed.split(/[.!?]+/).filter((s) => s.trim().length > 0).length
+    const avgWordsPerSentence = sentences > 0 ? wordCount / sentences : wordCount
 
-    const wordCount = response.split(/\s+/).filter((w) => w.length > 0).length
-    const sentences = response.split(/[.!?]+/).filter((s) => s.trim().length > 0).length
-    const avgWordsPerSentence = sentences > 0 ? wordCount / sentences : 0
-
-    // Structure indicators
     const structureKeywords = [
       "first",
       "second",
       "third",
       "finally",
-      "additionally",
-      "moreover",
+      "because",
+      "for example",
+      "specifically",
       "framework",
       "approach",
-      "structure",
       "bucket",
       "category",
-      "on one hand",
-      "on the other hand",
       "in conclusion",
       "to summarize",
+      "on the other hand",
+      "on one hand",
       "let me break this down",
-      "there are three",
-      "there are two",
     ]
-    const structureMatches = structureKeywords.filter((kw) => response.toLowerCase().includes(kw)).length
+    const structureMatches = structureKeywords.filter((kw) => lower.includes(kw)).length
+    const hasStructure = structureMatches > 0
 
-    // PM-specific keywords
-    const pmKeywords = [
-      "user",
-      "customer",
-      "metric",
-      "kpi",
-      "engagement",
-      "retention",
-      "prioritize",
-      "roadmap",
-      "mvp",
-      "hypothesis",
-      "segment",
-      "persona",
-      "pain point",
-      "value proposition",
-      "trade-off",
-      "data",
-      "a/b test",
-    ]
+    const hasNumbers = /\d+/.test(lower)
+    const hasPercent = /%|percent/.test(lower)
+    const hasQuantWords = /(metric|kpi|engagement|retention|revenue|cost|profit|stakeholder|customer|user)/i.test(
+      lower,
+    )
+    const hasQuant = hasNumbers || hasPercent || hasQuantWords
 
-    // Consulting-specific keywords
-    const consultingKeywords = [
-      "client",
-      "stakeholder",
-      "revenue",
-      "cost",
-      "profit",
-      "market",
-      "competitor",
-      "growth",
-      "synergy",
-      "implementation",
-      "recommendation",
-      "analysis",
-      "assumption",
-      "estimate",
-      "million",
-      "billion",
-      "percent",
-    ]
-
-    const relevantKeywords =
-      questionType === "Case Interview" || questionType === "Estimation" ? consultingKeywords : pmKeywords
-
-    const keywordMatches = relevantKeywords.filter((kw) => response.toLowerCase().includes(kw)).length
-
-    // Quantification indicators
-    const hasNumbers = /\d+/.test(response)
-    const hasPercentages = /%|percent/i.test(response)
-    const hasMetrics = /\d+[kmb]|\d+\s*(million|billion|thousand)/i.test(response)
-
-    // Calculate scores
-    let structureScore = 50
-    structureScore += Math.min(structureMatches * 8, 30)
-    structureScore += wordCount > 50 ? 10 : wordCount > 25 ? 5 : 0
-    structureScore += avgWordsPerSentence > 8 && avgWordsPerSentence < 25 ? 10 : 0
-    structureScore = Math.min(Math.max(structureScore, 30), 98)
-
-    let communicationScore = 55
-    communicationScore += sentences >= 3 ? 15 : sentences >= 2 ? 8 : 0
-    communicationScore += wordCount >= 40 ? 15 : wordCount >= 20 ? 8 : 0
-    communicationScore += avgWordsPerSentence > 5 && avgWordsPerSentence < 30 ? 10 : 0
-    communicationScore = Math.min(Math.max(communicationScore, 35), 98)
-
-    let insightsScore = 45
-    insightsScore += Math.min(keywordMatches * 5, 25)
-    insightsScore += hasNumbers ? 10 : 0
-    insightsScore += hasPercentages ? 8 : 0
-    insightsScore += hasMetrics ? 12 : 0
-    insightsScore = Math.min(Math.max(insightsScore, 30), 98)
-
-    // Overall score is weighted average
-    const overall = Math.round(
-      structureScore * 0.3 + communicationScore * 0.25 + insightsScore * 0.3 + 75 * 0.15, // baseline response time score
+    const hasRecommendation = /(recommend|therefore|so what|next steps|timeline|action plan|in conclusion|to summarize)/i.test(
+      lower,
     )
 
+    const hasSTAR = /(situation|task|action|result|star|outcome|impact|learned|what i learned)/i.test(lower)
+
+    // Response time scoring (harsher + deterministic)
+    const t = responseSeconds
+    const responseTimeScore =
+      t <= 25 ? 35 : t <= 60 ? 85 : t <= 150 ? 92 : t <= 240 ? 78 : 55
+
+    // Structure scoring: cap hard if missing signposts/framework.
+    let structureScore = hasStructure ? 70 + Math.min(structureMatches * 7, 20) : 40
+    if (wordCount < 35) structureScore = Math.min(structureScore, 55)
+    if (!hasStructure) structureScore = Math.min(structureScore, 55)
+
+    // Communication scoring: penalize very low sentence count and rambling.
+    let communicationScore = 60
+    communicationScore += sentences >= 3 ? 20 : sentences === 2 ? 10 : sentences === 1 ? 0 : -10
+    if (avgWordsPerSentence > 35) communicationScore -= 10
+    if (avgWordsPerSentence < 6 && wordCount < 50) communicationScore -= 5
+    communicationScore = Math.max(25, Math.min(95, communicationScore))
+
+    // Insights scoring: question-type aware requirements.
+    let insightsScore = 45
+    if (questionType === "Case Interview") {
+      insightsScore = hasQuant ? 75 : 35
+      if (!hasRecommendation) insightsScore -= 10
+    } else if (questionType === "Estimation") {
+      const hasAssumptionLike = /(assumption|sanity|range|uncertainty)/i.test(lower)
+      insightsScore = hasNumbers && hasAssumptionLike ? 80 : hasNumbers ? 60 : 30
+    } else if (questionType === "Behavioral") {
+      insightsScore = hasSTAR ? 75 : 35
+      if (!/outcome|result|impact|learned/i.test(lower)) insightsScore -= 10
+    } else {
+      // Product Sense
+      insightsScore = hasQuant ? 75 : 40
+      if (!/(risk|trade-off|prioritize|roadmap|success|metric|kpi)/i.test(lower)) insightsScore -= 10
+    }
+    insightsScore = Math.max(20, Math.min(95, insightsScore))
+
+    // Overall: slightly more weight on structure + insights, harsher than before.
+    const overallRaw = structureScore * 0.36 + communicationScore * 0.22 + insightsScore * 0.32 + responseTimeScore * 0.1
+    const overall = Math.round(overallRaw)
+
     return {
-      score: Math.min(Math.max(overall, 25), 95),
+      score: Math.min(Math.max(overall, 10), 95),
       breakdown: {
-        structure: structureScore,
-        communication: communicationScore,
-        insights: insightsScore,
-        responseTime: 70 + Math.floor(Math.random() * 20),
+        structure: Math.round(structureScore),
+        communication: Math.round(communicationScore),
+        insights: Math.round(insightsScore),
+        responseTime: Math.round(responseTimeScore),
       },
     }
   }
 
-  const calculateFeedback = (allResponses: string[]) => {
+  const calculateFeedback = (allResponses: string[], allResponseTimes: number[]) => {
     window.speechSynthesis.cancel()
     safeStopRecognition()
 
-    const responseScores = allResponses.map((response) => calculateResponseScore(response, config.interviewType))
+    const responseScores = allResponses.map((response, i) =>
+      calculateResponseScore(response, config.interviewType, allResponseTimes[i] ?? 0),
+    )
 
     const avgStructure = Math.round(
       responseScores.reduce((sum, r) => sum + r.breakdown.structure, 0) / Math.max(responseScores.length, 1),
@@ -592,9 +724,32 @@ export default function InterviewRoom({ config, onComplete }: InterviewRoomProps
     setIsRecording(false)
     setLiveCaption("")
 
-    const allResponses = transcript ? [...responses, transcript] : responses
-    calculateFeedback(allResponses)
-  }, [responses, transcript, safeStopRecognition])
+    const trimmed = transcript?.trim() ?? ""
+    const hasFollowUp = Boolean(currentFollowUp)
+    const base = pendingBaseResponseRef.current
+
+    const followUpSeconds = hasFollowUp ? responseTime : 0
+    const baseSeconds = hasFollowUp ? pendingBaseResponseTimeRef.current : 0
+
+    const allResponses = hasFollowUp
+      ? [
+          ...responses,
+          base
+            ? `${base} [Follow-up: ${currentFollowUp}] ${trimmed}`
+            : `[Follow-up: ${currentFollowUp}] ${trimmed}`,
+        ]
+      : trimmed
+        ? [...responses, trimmed]
+        : responses
+
+    const allResponseTimes = hasFollowUp
+      ? [...responseTimes, baseSeconds + followUpSeconds]
+      : trimmed
+        ? [...responseTimes, responseTime]
+        : responseTimes
+
+    calculateFeedback(allResponses, allResponseTimes)
+  }, [responses, responseTimes, transcript, responseTime, safeStopRecognition, currentFollowUp])
 
   const handleToggleMic = useCallback(() => {
     if (isMicOn) {

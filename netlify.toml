@@ -5,7 +5,9 @@
 
 [build]
   command = "npm run build"
-  publish = "build"
 
 [build.environment]
-  NODE_VERSION = "18"   # or 20 depending on your package-lock / engine
+  NODE_VERSION = "20"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

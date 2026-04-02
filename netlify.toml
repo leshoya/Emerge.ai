@@ -1,4 +1,11 @@
 [[redirects]]
-    from = "/*"
-    to = "/index.html"
-    status = 200
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[build]
+  command = "npm run build"
+  publish = "build"
+
+[build.environment]
+  NODE_VERSION = "18"   # or 20 depending on your package-lock / engine
